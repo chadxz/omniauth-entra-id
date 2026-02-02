@@ -21,3 +21,4 @@ Gemfile.lock
 # macOS metadata
 .DS_Store
 
+mise.toml

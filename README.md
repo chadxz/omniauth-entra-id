@@ -100,16 +100,23 @@ config.omniauth(
 
 All of the items listed below are optional, unless noted otherwise. They can be provided either in a static configuration Hash as shown in examples above, or via *read accessor instance methods* in a provider class (more on this later).
 
-To have your application authenticate with Entra via a client secret, specify `client_secret`. If you instead want to use certificate-based authentication via client assertion, give the `certificate_path` and `tenant_id` instead. You should provide only `client_secret` or `certificate_path`, not both.
+There are three ways to authenticate your application with Entra:
 
-If you're using the client assertion flow, you need to register your certificate in the Entra portal. For more information, please see [the documentation](https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials).
+1. **Client secret** - Specify `client_secret` (most common)
+2. **Certificate** - Specify `certificate_path` and `tenant_id` for certificate-based client assertion
+3. **Workload Identity** - For apps running on platforms with [Workload Identity Federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation) configured, no configuration is needed - the gem automatically detects and uses the federated token
+
+If you're using the certificate flow, you need to register your certificate in the Entra portal. For more information, please see [the documentation](https://learn.microsoft.com/en-us/entra/identity-platform/certificate-credentials).
+
+If you're using Workload Identity, see the "Workload Identity Federation" section below.
 
 | Option                        | Use |
 | ----------------------------- | --- |
-| `client_id`                   | **Mandatory.** Client ID for the 'application' (integration) configured on the Entra side. Found via the Entra UI. |
-| `client_secret`               | **Mandatory for client secret flow.** Client secret for the 'application' (integration) configured on the Entra side. Found via the Entra UI. Don't give this if using client assertion flow. |
-| `certificate_path`            | **Mandatory for client assertion flow.** Don't give this if using a client secret instead of client assertion. This should be the filepath to a PKCS#12 file. |
-| `tenant_id`                   | **Mandatory for client assertion flow.** Entra Tenant ID for multi-tenanted use. Default is `common`. Forms part of the Entra OAuth URL - `{base}/{tenant_id}/oauth2/v2.0/...` |
+| `client_id`                   | **Mandatory unless using Workload Identity.** Client ID for the 'application' (integration) configured on the Entra side. Found via the Entra UI. When using Workload Identity, this is read from the `AZURE_CLIENT_ID` environment variable. |
+| `client_secret`               | **Mandatory for client secret flow.** Client secret for the 'application' (integration) configured on the Entra side. Found via the Entra UI. Don't give this if using client assertion or Workload Identity flow. |
+| `certificate_path`            | **Mandatory for certificate flow.** Don't give this if using a client secret or Workload Identity. This should be the filepath to a PKCS#12 file. |
+| `tenant_id`                   | **Mandatory for certificate flow.** Entra Tenant ID for multi-tenanted use. Default is `common`. Forms part of the Entra OAuth URL - `{base}/{tenant_id}/oauth2/v2.0/...` When using Workload Identity, this is read from the `AZURE_TENANT_ID` environment variable. |
+| `use_workload_identity?`      | For custom provider classes only. Return `true` to explicitly enable Workload Identity authentication. |
 | `base_url`                    | Location of Entra login page, for specialised requirements; default is `OmniAuth::Strategies::EntraId::BASE_URL` (at the time of writing, this is `https://login.microsoftonline.com`). |
 | `tenant_name`                 | For what is currently known by its old name of "Azure ActiveDirectory B2C" (and only active if `custom_policy` is also provided - see below), set the tenancy name to constructs the correct B2C endpoint of `{tenant_name}.b2clogin.com/{tenant_name}.onmicrosoft.com/{custom_policy>}" and uses that for auth calls. This is a convenience feature; the `base_entra_url` option could also be manually built up in the same way. |
 | `custom_policy`               | Custom policy. Default is nil. Used in conjunction with `tenant_name`- see above. |
@@ -130,6 +137,54 @@ Solve this for B2C use cases by giving your tenant name and custom policy name i
 ```
 <tenant-name>.b2clogin.com/<tenant-name>.onmicrosoft.com/<policy-name>/oauth2/v2.0/...
 ```
+
+#### Workload Identity Federation
+
+[Workload Identity Federation](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation) allows applications to authenticate to Entra ID without storing client secrets. Instead, your application exchanges a token from an external identity provider (such as Kubernetes, GitHub Actions, or other cloud providers) for an Entra ID access token.
+
+When the following environment variables are present, the gem automatically uses Workload Identity:
+
+| Environment Variable         | Description                                                      |
+| ---------------------------- | ---------------------------------------------------------------- |
+| `AZURE_FEDERATED_TOKEN_FILE` | Path to the token file provided by the external identity provider |
+| `AZURE_CLIENT_ID`            | Client ID of the Entra ID app registration                        |
+| `AZURE_TENANT_ID`            | Tenant ID                                                         |
+
+These variables are typically set automatically by your platform's workload identity integration.
+
+> **Note:** Explicit configuration (`client_secret` or `certificate_path`) takes precedence over Workload Identity auto-detection. This allows local development with `client_secret` even when Workload Identity environment variables are present.
+
+**Zero-config usage:**
+
+```ruby
+Rails.application.config.middleware.use OmniAuth::Builder do
+  provider :entra_id  # No configuration needed!
+end
+```
+
+**Explicit opt-in via custom provider:**
+
+```ruby
+class WorkloadIdentityProvider
+  def initialize(strategy); end
+  def client_id; 'any-value'; end
+
+  def use_workload_identity?
+    true
+  end
+end
+
+Rails.application.config.middleware.use OmniAuth::Builder do
+  provider :entra_id, WorkloadIdentityProvider
+end
+```
+
+**Azure setup required:**
+
+Your Entra ID app registration needs a federated credential that trusts tokens from your external identity provider. For setup instructions, see:
+
+* [Workload Identity Federation overview](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation)
+* [Create a trust relationship with an external identity provider](https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation-create-trust)
 
 #### Explaining `authorize_params`
 

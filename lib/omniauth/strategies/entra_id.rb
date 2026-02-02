@@ -31,22 +31,57 @@ module OmniAuth
           options
         end
 
-        options.client_id = provider.client_id
-
+        # Explicit configuration takes precedence over auto-detected workload identity.
+        # This allows local development with client_secret even when workload identity
+        # environment variables are present.
         if provider.respond_to?(:client_secret) && provider.client_secret
+          options.client_id = provider.client_id
           options.client_secret = provider.client_secret
         elsif provider.respond_to?(:certificate_path) && provider.respond_to?(:tenant_id) && provider.certificate_path && provider.tenant_id
+          options.client_id = provider.client_id
           options.token_params = {
             tenant:                provider.tenant_id,
             client_id:             provider.client_id,
             client_assertion:      client_assertion(provider.tenant_id, provider.client_id, provider.certificate_path),
             client_assertion_type: client_assertion_type
           }
+        elsif workload_identity_available?(provider)
+          # Workload Identity flow: use federated token for passwordless authentication.
+          # Note: A new strategy instance is created per request, so the token
+          # is read fresh for each authentication flow.
+          wi_client_id = ENV['AZURE_CLIENT_ID']
+          wi_tenant_id = ENV['AZURE_TENANT_ID']
+          wi_token_file = ENV['AZURE_FEDERATED_TOKEN_FILE']
+
+          # Validate required environment variables
+          unless wi_client_id && wi_tenant_id && wi_token_file
+            raise ArgumentError, "Workload Identity requires AZURE_CLIENT_ID, AZURE_TENANT_ID, and AZURE_FEDERATED_TOKEN_FILE environment variables"
+          end
+
+          # Read the federated token from the projected file
+          wi_token = begin
+            File.read(wi_token_file)
+          rescue StandardError => e
+            raise ArgumentError, "Failed to read workload identity token from #{wi_token_file}: #{e.message}"
+          end
+
+          options.client_id = wi_client_id
+          options.token_params = {
+            tenant:                wi_tenant_id,
+            client_id:             wi_client_id,
+            client_assertion:      wi_token,
+            client_assertion_type: client_assertion_type
+          }
+
+          # Store tenant_id for URL construction
+          @workload_identity_tenant_id = wi_tenant_id
         else
-          raise ArgumentError, "You must provide either client_secret or certificate_path and tenant_id"
+          raise ArgumentError, "You must provide either client_secret, certificate_path, or configure Workload Identity"
         end
 
-        options.tenant_id = if provider.respond_to?(:tenant_id)
+        options.tenant_id = if @workload_identity_tenant_id
+          @workload_identity_tenant_id
+        elsif provider.respond_to?(:tenant_id)
           provider.tenant_id
         else
           COMMON_TENANT_ID
@@ -201,6 +236,27 @@ module OmniAuth
         end
 
         @raw_info
+      end
+
+      # https://learn.microsoft.com/en-us/entra/workload-id/workload-identity-federation
+      #
+      # Workload Identity Federation allows passwordless authentication using
+      # a federated token from an external identity provider (e.g., Kubernetes).
+      # The token is projected into the pod and used as a client assertion.
+      #
+      def workload_identity_available?(provider)
+        # Check if provider explicitly opts into workload identity
+        return true if provider.respond_to?(:use_workload_identity?) && provider.use_workload_identity?
+
+        # Check for Azure Workload Identity environment variables
+        token_file = ENV['AZURE_FEDERATED_TOKEN_FILE']
+        client_id  = ENV['AZURE_CLIENT_ID']
+        tenant_id  = ENV['AZURE_TENANT_ID']
+
+        return false unless token_file && client_id && tenant_id
+        return false unless File.exist?(token_file)
+
+        true
       end
 
       # https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow#request-an-access-token-with-a-certificate-credential

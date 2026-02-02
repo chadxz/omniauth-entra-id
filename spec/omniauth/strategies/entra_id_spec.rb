@@ -61,7 +61,7 @@ RSpec.describe OmniAuth::Strategies::EntraId do
         end
 
         it 'raises exception' do
-          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret or certificate_path and tenant_id")
+          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret, certificate_path, or configure Workload Identity")
         end
       end # "context 'using client secret flow without client secret' do"
 
@@ -72,12 +72,12 @@ RSpec.describe OmniAuth::Strategies::EntraId do
 
         it 'raises exception when tenant id is not given' do
           @options = { client_id: 'id', certificate_path: 'path/to/cert.p12' }
-          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret or certificate_path and tenant_id")
+          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret, certificate_path, or configure Workload Identity")
         end
 
         it 'raises exception when certificate_path is not given' do
           @options = { client_id: 'id', tenant_id: 'tenant' }
-          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret or certificate_path and tenant_id")
+          expect { subject.client }.to raise_error(ArgumentError, "You must provide either client_secret, certificate_path, or configure Workload Identity")
         end
 
         context '#token_params with correctly formatted request' do
@@ -142,6 +142,308 @@ RSpec.describe OmniAuth::Strategies::EntraId do
           end # "context 'client assertion' do"
         end # "context '#token_params with correctly formatted request' do"
       end # "context 'using client assertion flow' do"
+
+      context 'using workload identity flow' do
+        let(:federated_token) { 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzeXN0ZW06c2VydmljZWFjY291bnQ6ZGVmYXVsdDpteS1hcHAiLCJhdWQiOiJhcGk6Ly9BenVyZUFEVG9rZW5FeGNoYW5nZSIsImlzcyI6Imh0dHBzOi8vb2lkYy5la3MuYW1hem9uYXdzLmNvbS9pZC9leGFtcGxlIiwiZXhwIjoxNzA0MDY3MjAwfQ.signature' }
+        let(:token_file_path) { '/var/run/secrets/azure/tokens/azure-identity-token' }
+
+        subject do
+          OmniAuth::Strategies::EntraId.new(app, options)
+        end
+
+        before do
+          allow(subject).to receive(:request) { request }
+        end
+
+        context 'with true zero-config (no options provided)' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+            allow(File).to receive(:read).with(token_file_path).and_return(federated_token)
+          end
+
+          it 'works without any configuration options' do
+            subject.client
+            expect(subject.options.client_id).to eql('wi-client-id')
+            expect(subject.options.token_params[:client_assertion]).to eql(federated_token)
+          end
+        end
+
+        context 'when workload identity environment variables are present' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+            allow(File).to receive(:read).with(token_file_path).and_return(federated_token)
+          end
+
+          it 'uses workload identity authentication' do
+            subject.client
+            expect(subject.options.token_params[:client_assertion]).to eql(federated_token)
+          end
+
+          it 'has correct client_assertion_type' do
+            subject.client
+            expect(subject.options.token_params[:client_assertion_type]).to eql('urn:ietf:params:oauth:client-assertion-type:jwt-bearer')
+          end
+
+          it 'uses client_id from environment variable' do
+            subject.client
+            expect(subject.options.token_params[:client_id]).to eql('wi-client-id')
+          end
+
+          it 'uses tenant_id from environment variable' do
+            subject.client
+            expect(subject.options.token_params[:tenant]).to eql('wi-tenant-id')
+          end
+
+          it 'sets the tenant_id option for URL construction' do
+            subject.client
+            expect(subject.options.tenant_id).to eql('wi-tenant-id')
+          end
+
+          it 'has correct token url' do
+            expect(subject.client.options[:token_url]).to eql('https://login.microsoftonline.com/wi-tenant-id/oauth2/v2.0/token')
+          end
+
+          it 'has correct authorize url' do
+            expect(subject.client.options[:authorize_url]).to eql('https://login.microsoftonline.com/wi-tenant-id/oauth2/v2.0/authorize')
+          end
+        end
+
+        context 'when token file does not exist' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(false)
+          end
+
+          it 'raises an error since no other auth method is configured' do
+            expect { subject.client }.to raise_error(ArgumentError, /client_secret, certificate_path, or configure Workload Identity/)
+          end
+        end
+
+        context 'when AZURE_FEDERATED_TOKEN_FILE is not set' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV.delete('AZURE_FEDERATED_TOKEN_FILE')
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          it 'raises an error since no other auth method is configured' do
+            expect { subject.client }.to raise_error(ArgumentError, /client_secret, certificate_path, or configure Workload Identity/)
+          end
+        end
+
+        context 'when AZURE_CLIENT_ID is not set' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV.delete('AZURE_CLIENT_ID')
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+          end
+
+          it 'raises an error since no other auth method is configured' do
+            expect { subject.client }.to raise_error(ArgumentError, /client_secret, certificate_path, or configure Workload Identity/)
+          end
+        end
+
+        context 'when AZURE_TENANT_ID is not set' do
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV.delete('AZURE_TENANT_ID')
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+          end
+
+          it 'raises an error since no other auth method is configured' do
+            expect { subject.client }.to raise_error(ArgumentError, /client_secret, certificate_path, or configure Workload Identity/)
+          end
+        end
+
+        context 'when client_secret is also provided' do
+          subject do
+            OmniAuth::Strategies::EntraId.new(app, { client_id: 'explicit-id', client_secret: 'my-secret' })
+          end
+
+          around do |example|
+            original_env = ENV.to_hash
+            ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+            ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+            ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+            example.run
+          ensure
+            ENV.replace(original_env)
+          end
+
+          before do
+            allow(subject).to receive(:request) { request }
+            allow(File).to receive(:exist?).and_call_original
+            allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+            allow(File).to receive(:read).with(token_file_path).and_return(federated_token)
+          end
+
+          it 'prefers explicit client_secret over workload identity' do
+            subject.client
+            expect(subject.options.client_secret).to eql('my-secret')
+            expect(subject.options.client_id).to eql('explicit-id')
+            expect(subject.options.token_params[:client_assertion]).to be_nil
+          end
+        end
+      end # "context 'using workload identity flow' do"
+
+      context 'using dynamic provider with workload identity' do
+        let(:federated_token) { 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.federated-token' }
+        let(:token_file_path) { '/var/run/secrets/azure/tokens/azure-identity-token' }
+
+        let(:provider_klass) {
+          Class.new {
+            def initialize(strategy)
+            end
+
+            def client_id
+              'provider-client-id'
+            end
+
+            def use_workload_identity?
+              true
+            end
+          }
+        }
+
+        subject do
+          OmniAuth::Strategies::EntraId.new(app, provider_klass)
+        end
+
+        around do |example|
+          original_env = ENV.to_hash
+          ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+          ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+          ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+          example.run
+        ensure
+          ENV.replace(original_env)
+        end
+
+        before do
+          allow(subject).to receive(:request) { request }
+          allow(File).to receive(:exist?).and_call_original
+          allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+          allow(File).to receive(:read).with(token_file_path).and_return(federated_token)
+        end
+
+        it 'uses workload identity when provider returns use_workload_identity? true' do
+          subject.client
+          expect(subject.options.token_params[:client_assertion]).to eql(federated_token)
+        end
+      end # "context 'using dynamic provider with workload identity' do"
+
+      context 'when token file cannot be read' do
+        let(:federated_token) { 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.federated-token' }
+        let(:token_file_path) { '/var/run/secrets/azure/tokens/azure-identity-token' }
+
+        subject do
+          OmniAuth::Strategies::EntraId.new(app, options)
+        end
+
+        around do |example|
+          original_env = ENV.to_hash
+          ENV['AZURE_FEDERATED_TOKEN_FILE'] = token_file_path
+          ENV['AZURE_CLIENT_ID'] = 'wi-client-id'
+          ENV['AZURE_TENANT_ID'] = 'wi-tenant-id'
+          example.run
+        ensure
+          ENV.replace(original_env)
+        end
+
+        before do
+          allow(subject).to receive(:request) { request }
+          allow(File).to receive(:exist?).and_call_original
+          allow(File).to receive(:exist?).with(token_file_path).and_return(true)
+          allow(File).to receive(:read).with(token_file_path).and_raise(Errno::EACCES, "Permission denied")
+        end
+
+        it 'raises an error with a helpful message' do
+          expect { subject.client }.to raise_error(ArgumentError, /Failed to read workload identity token/)
+        end
+      end # "context 'when token file cannot be read' do"
+
+      context 'when provider returns use_workload_identity? true but env vars are missing' do
+        let(:provider_klass) {
+          Class.new {
+            def initialize(strategy)
+            end
+
+            def client_id
+              'provider-client-id'
+            end
+
+            def use_workload_identity?
+              true
+            end
+          }
+        }
+
+        subject do
+          OmniAuth::Strategies::EntraId.new(app, provider_klass)
+        end
+
+        before do
+          allow(subject).to receive(:request) { request }
+        end
+
+        it 'raises an error with a helpful message' do
+          expect { subject.client }.to raise_error(ArgumentError, /Workload Identity requires/)
+        end
+      end # "context 'when provider returns use_workload_identity? true but env vars are missing' do"
 
       describe "overrides" do
         it 'should override domain_hint' do
